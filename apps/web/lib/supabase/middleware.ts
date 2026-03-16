@@ -39,5 +39,25 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
+  // Check if authenticated user has an org (skip for onboarding and API routes)
+  if (
+    user &&
+    !request.nextUrl.pathname.startsWith('/onboarding') &&
+    !request.nextUrl.pathname.startsWith('/api') &&
+    !request.nextUrl.pathname.startsWith('/auth')
+  ) {
+    const { data: dbUser } = await supabase
+      .from('users')
+      .select('org_id')
+      .eq('auth_uid', user.id)
+      .single();
+
+    if (!dbUser?.org_id) {
+      const url = request.nextUrl.clone();
+      url.pathname = '/onboarding';
+      return NextResponse.redirect(url);
+    }
+  }
+
   return supabaseResponse;
 }

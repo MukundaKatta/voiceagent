@@ -64,6 +64,25 @@ async function start() {
     return { phoneNumber: provisioned };
   });
 
+  // Full tenant setup (subaccount + number)
+  fastify.post('/api/tenants/setup', async (request, reply) => {
+    const authHeader = request.headers.authorization;
+    if (authHeader !== `Bearer ${process.env.INTERNAL_API_KEY}`) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+    const { orgId, orgName, areaCode } = request.body as { orgId: string; orgName: string; areaCode?: string };
+
+    // Search for a number
+    const numbers = await twilioService.searchNumbers(areaCode, 'US', 1);
+    if (numbers.length === 0) {
+      return reply.status(404).send({ error: 'No numbers available' });
+    }
+
+    // Provision it
+    const phoneNumber = await twilioService.provisionNumber(numbers[0].phoneNumber, orgId);
+    return { phoneNumber, orgId };
+  });
+
   // Google Calendar OAuth
   fastify.get('/api/calendar/oauth', async (request, reply) => {
     const { orgId } = request.query as { orgId: string };

@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { PLAN_LIMITS } from '@voiceagent/shared';
 import type { Plan } from '@voiceagent/shared';
+import { UpgradeButton } from './upgrade-button';
 
 export default async function BillingPage() {
   const supabase = await createClient();
@@ -86,6 +87,7 @@ export default async function BillingPage() {
                     <li key={f} className="text-sm text-muted-foreground">• {f}</li>
                   ))}
                 </ul>
+                <UpgradeButton plan={p.key} currentPlan={plan} />
               </CardContent>
             </Card>
           ))}

@@ -79,4 +79,59 @@ export class TwilioService {
       voiceMethod: 'POST',
     });
   }
+
+  /**
+   * Create a Twilio subaccount for a tenant.
+   * Subaccounts provide isolated call logs and billing.
+   */
+  async createSubaccount(orgName: string, orgId: string): Promise<{ sid: string; authToken: string }> {
+    const account = await client.api.accounts.create({
+      friendlyName: `VoiceAgent - ${orgName}`,
+    });
+
+    // Store the subaccount SID
+    await supabase
+      .from('organizations')
+      .update({ twilio_sid: account.sid })
+      .eq('id', orgId);
+
+    return {
+      sid: account.sid,
+      authToken: account.authToken,
+    };
+  }
+
+  /**
+   * Provision a number under a tenant's subaccount.
+   */
+  async provisionNumberForSubaccount(
+    phoneNumber: string,
+    orgId: string,
+    subaccountSid: string,
+    subaccountAuthToken: string
+  ): Promise<string> {
+    const subClient = twilio(subaccountSid, subaccountAuthToken);
+
+    const voiceUrl = process.env.VOICE_SERVER_URL
+      ? `${process.env.VOICE_SERVER_URL}/voice/incoming`
+      : '';
+    const statusUrl = process.env.VOICE_SERVER_URL
+      ? `${process.env.VOICE_SERVER_URL}/voice/status`
+      : '';
+
+    const purchased = await subClient.incomingPhoneNumbers.create({
+      phoneNumber,
+      voiceUrl,
+      voiceMethod: 'POST',
+      statusCallback: statusUrl,
+      statusCallbackMethod: 'POST',
+    });
+
+    await supabase
+      .from('organizations')
+      .update({ phone_number: purchased.phoneNumber })
+      .eq('id', orgId);
+
+    return purchased.phoneNumber;
+  }
 }
