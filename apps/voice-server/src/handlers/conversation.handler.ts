@@ -8,8 +8,11 @@ import type {
 import { supabase } from '../services/supabase.service.js';
 import { BedrockService } from '../services/bedrock.service.js';
 import { KnowledgeService } from '../services/knowledge.service.js';
+import { AnalyticsService } from '../services/analytics.service.js';
 import { executeToolCall } from './tools.handler.js';
 import { buildSystemPrompt } from '../prompts/system.prompt.js';
+
+const SENTENCE_DELIMITERS = /[.!?;]\s/;
 
 interface SessionState {
   orgId: string;
@@ -18,7 +21,11 @@ interface SessionState {
   conversationHistory: TranscriptEntry[];
   bedrockService: BedrockService;
   knowledgeService: KnowledgeService;
+  analyticsService: AnalyticsService;
   isProcessing: boolean;
+  activeAbortController: AbortController | null;
+  callEnded: boolean;
+  startedAt: number;
 }
 
 export async function conversationHandler(socket: WebSocket, request: FastifyRequest) {
@@ -33,7 +40,11 @@ export async function conversationHandler(socket: WebSocket, request: FastifyReq
     conversationHistory: [],
     bedrockService: new BedrockService(),
     knowledgeService: new KnowledgeService(),
+    analyticsService: new AnalyticsService(),
     isProcessing: false,
+    activeAbortController: null,
+    callEnded: false,
+    startedAt: Date.now(),
   };
 
   request.log.info({ orgId, callSid }, 'WebSocket connected');
@@ -45,9 +56,15 @@ export async function conversationHandler(socket: WebSocket, request: FastifyReq
     .eq('id', orgId)
     .single();
 
+  if (!org) {
+    request.log.error({ orgId }, 'Organization not found, closing WebSocket');
+    socket.close();
+    return;
+  }
+
   state.org = org;
 
-  // Update call status
+  // Update call status to in_progress
   await supabase
     .from('calls')
     .update({ status: 'in_progress' })
@@ -58,35 +75,25 @@ export async function conversationHandler(socket: WebSocket, request: FastifyReq
       const message: ConversationRelayMessage = JSON.parse(data.toString());
 
       switch (message.type) {
+        case 'setup':
+          request.log.info({ callSid, from: (message as any).from }, 'ConversationRelay setup');
+          break;
+
         case 'prompt':
           await handlePrompt(socket, state, message.voicePrompt, request);
           break;
 
         case 'interrupt':
-          state.isProcessing = false;
-          request.log.info({ callSid }, 'User interrupted');
+          handleInterrupt(state, request);
           break;
 
         case 'dtmf':
-          request.log.info({ callSid, digit: message.digit }, 'DTMF received');
-          // Handle DTMF (e.g., press 0 for operator)
-          if (message.digit === '0' && state.org?.transfer_number) {
-            socket.send(JSON.stringify({
-              type: 'end',
-              handoffData: JSON.stringify({
-                reasonCode: 'live-agent',
-                reason: 'Customer pressed 0 for operator',
-              }),
-            }));
-          }
-          break;
-
-        case 'setup':
-          request.log.info({ callSid }, 'ConversationRelay setup complete');
+          handleDtmf(socket, state, message.digit, request);
           break;
 
         case 'end':
-          await handleCallEnd(state, request);
+          request.log.info({ callSid }, 'ConversationRelay ended');
+          await handleCallEnd(socket, state, request);
           break;
       }
     } catch (error) {
@@ -95,9 +102,78 @@ export async function conversationHandler(socket: WebSocket, request: FastifyReq
   });
 
   socket.on('close', async () => {
-    request.log.info({ callSid }, 'WebSocket closed');
-    await handleCallEnd(state, request);
+    request.log.info({ callSid }, 'WebSocket disconnected');
+    await handleCallEnd(socket, state, request);
   });
+
+  socket.on('error', (error) => {
+    request.log.error({ error, callSid }, 'WebSocket error');
+  });
+}
+
+function handleInterrupt(state: SessionState, request: FastifyRequest) {
+  state.isProcessing = false;
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+    state.activeAbortController = null;
+  }
+  request.log.info({ callSid: state.callSid }, 'User interrupted — stream aborted');
+}
+
+function handleDtmf(socket: WebSocket, state: SessionState, digit: string, request: FastifyRequest) {
+  request.log.info({ callSid: state.callSid, digit }, 'DTMF received');
+
+  // Press 0 for operator
+  if (digit === '0' && state.org?.transfer_number) {
+    sendHandoff(socket, state, 'live-agent', 'Customer pressed 0 for operator');
+  }
+
+  // Press 9 for repeat
+  if (digit === '9' && state.conversationHistory.length > 0) {
+    const lastAssistant = [...state.conversationHistory]
+      .reverse()
+      .find((e) => e.role === 'assistant');
+    if (lastAssistant) {
+      socket.send(JSON.stringify({ type: 'text', token: lastAssistant.content, last: true }));
+    }
+  }
+}
+
+function sendHandoff(socket: WebSocket, state: SessionState, reasonCode: string, reason: string) {
+  socket.send(JSON.stringify({
+    type: 'end',
+    handoffData: JSON.stringify({
+      reasonCode,
+      reason,
+      transferTo: state.org?.transfer_number,
+    }),
+  }));
+}
+
+/**
+ * Sends text to ConversationRelay in sentence-sized chunks.
+ * ConversationRelay TTS sounds more natural with complete sentences.
+ */
+function sendBuffered(socket: WebSocket, buffer: { text: string }, flush: boolean) {
+  if (!buffer.text) return;
+
+  if (flush) {
+    // Send everything remaining
+    socket.send(JSON.stringify({ type: 'text', token: buffer.text.trim(), last: true }));
+    buffer.text = '';
+    return;
+  }
+
+  // Look for sentence boundaries
+  const match = buffer.text.match(SENTENCE_DELIMITERS);
+  if (match && match.index !== undefined) {
+    const splitAt = match.index + match[0].length;
+    const sentence = buffer.text.slice(0, splitAt).trim();
+    buffer.text = buffer.text.slice(splitAt);
+    if (sentence) {
+      socket.send(JSON.stringify({ type: 'text', token: sentence, last: false }));
+    }
+  }
 }
 
 async function handlePrompt(
@@ -107,6 +183,12 @@ async function handlePrompt(
   request: FastifyRequest
 ) {
   if (!state.org) return;
+
+  // Cancel any in-flight stream
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+    state.activeAbortController = null;
+  }
 
   state.isProcessing = true;
 
@@ -123,94 +205,157 @@ async function handlePrompt(
   );
 
   if (isEmergency && state.org.transfer_number) {
+    request.log.warn({ callSid: state.callSid }, 'Emergency keyword detected — transferring');
     socket.send(JSON.stringify({
-      type: 'end',
-      handoffData: JSON.stringify({
-        reasonCode: 'live-agent',
-        reason: 'Emergency keyword detected',
-      }),
+      type: 'text',
+      token: "I'm connecting you to someone right away. Please hold.",
+      last: true,
     }));
+    sendHandoff(socket, state, 'live-agent', 'Emergency keyword detected');
     return;
   }
 
   // Retrieve relevant knowledge
-  const relevantKnowledge = await state.knowledgeService.search(
-    state.orgId,
-    userMessage
-  );
+  const relevantKnowledge = await state.knowledgeService.search(state.orgId, userMessage);
 
   // Build system prompt
   const systemPrompt = buildSystemPrompt(state.org, relevantKnowledge);
 
-  // Call Bedrock Claude
   try {
-    const response = await state.bedrockService.converse(
+    const buffer = { text: '' };
+
+    const abortController = await state.bedrockService.converseStream(
       systemPrompt,
       state.conversationHistory,
-      state.org
+      state.org,
+      {
+        onToken(token: string) {
+          if (!state.isProcessing) return;
+          buffer.text += token;
+          sendBuffered(socket, buffer, false);
+        },
+
+        onComplete(fullText: string) {
+          if (!state.isProcessing) return;
+          // Flush remaining buffer
+          sendBuffered(socket, buffer, true);
+          state.conversationHistory.push({
+            role: 'assistant',
+            content: fullText,
+            timestamp: new Date().toISOString(),
+          });
+          state.isProcessing = false;
+          state.activeAbortController = null;
+        },
+
+        async onToolUse(toolUse) {
+          if (!state.isProcessing) return;
+          request.log.info({ tool: toolUse.name }, 'Tool call from stream');
+
+          const toolResult = await executeToolCall(
+            toolUse.name,
+            toolUse.input,
+            state,
+            request
+          );
+
+          // Check if this is a transfer action
+          const parsed = JSON.parse(toolResult);
+          if (parsed.action === 'transfer' && parsed.transferTo) {
+            socket.send(JSON.stringify({
+              type: 'text',
+              token: "I'm transferring you now. One moment please.",
+              last: true,
+            }));
+            sendHandoff(socket, state, 'live-agent', parsed.message);
+            return;
+          }
+
+          // Get follow-up response after tool execution (non-streaming, since it's a short response)
+          const followUp = await state.bedrockService.converseWithToolResult(
+            systemPrompt,
+            state.conversationHistory,
+            toolUse,
+            toolResult,
+            state.org!
+          );
+
+          if (state.isProcessing && followUp.text) {
+            socket.send(JSON.stringify({ type: 'text', token: followUp.text, last: true }));
+            state.conversationHistory.push({
+              role: 'assistant',
+              content: followUp.text,
+              timestamp: new Date().toISOString(),
+            });
+          }
+
+          state.isProcessing = false;
+          state.activeAbortController = null;
+        },
+
+        onError(error: Error) {
+          request.log.error({ error }, 'Bedrock stream error');
+          if (state.isProcessing) {
+            socket.send(JSON.stringify({
+              type: 'text',
+              token: "I'm sorry, I had trouble with that. Could you say that again?",
+              last: true,
+            }));
+          }
+          state.isProcessing = false;
+          state.activeAbortController = null;
+        },
+      }
     );
 
-    if (!state.isProcessing) return; // Interrupted
-
-    // Handle tool use
-    if (response.toolUse) {
-      const toolResult = await executeToolCall(
-        response.toolUse.name,
-        response.toolUse.input,
-        state,
-        request
-      );
-
-      // Get follow-up response after tool execution
-      state.conversationHistory.push({
-        role: 'assistant',
-        content: response.text || '',
-        timestamp: new Date().toISOString(),
-      });
-
-      const followUp = await state.bedrockService.converseWithToolResult(
-        systemPrompt,
-        state.conversationHistory,
-        response.toolUse,
-        toolResult,
-        state.org
-      );
-
-      if (state.isProcessing && followUp.text) {
-        socket.send(JSON.stringify({ type: 'text', token: followUp.text, last: true }));
-        state.conversationHistory.push({
-          role: 'assistant',
-          content: followUp.text,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    } else if (response.text) {
-      socket.send(JSON.stringify({ type: 'text', token: response.text, last: true }));
-      state.conversationHistory.push({
-        role: 'assistant',
-        content: response.text,
-        timestamp: new Date().toISOString(),
-      });
-    }
+    state.activeAbortController = abortController;
   } catch (error) {
-    request.log.error({ error }, 'Bedrock conversation error');
+    request.log.error({ error }, 'Failed to start Bedrock stream');
     socket.send(JSON.stringify({
       type: 'text',
-      token: "I'm sorry, I'm having trouble processing that. Could you please repeat?",
+      token: "I'm sorry, I'm having trouble right now. Could you please repeat that?",
       last: true,
     }));
+    state.isProcessing = false;
   }
 }
 
-async function handleCallEnd(state: SessionState, request: FastifyRequest) {
-  if (state.conversationHistory.length === 0) return;
+async function handleCallEnd(socket: WebSocket, state: SessionState, request: FastifyRequest) {
+  // Prevent double execution
+  if (state.callEnded) return;
+  state.callEnded = true;
+
+  // Cancel any in-flight stream
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+    state.activeAbortController = null;
+  }
+
+  if (state.conversationHistory.length === 0) {
+    // Mark as missed if no conversation happened
+    await supabase
+      .from('calls')
+      .update({ status: 'missed', ended_at: new Date().toISOString() })
+      .eq('twilio_call_sid', state.callSid);
+    return;
+  }
 
   try {
-    // Generate call summary
-    const summary = await state.bedrockService.summarizeCall(state.conversationHistory);
+    const durationSeconds = Math.round((Date.now() - state.startedAt) / 1000);
+    const minutesBilled = Math.ceil(durationSeconds / 60);
 
-    // Detect intent and sentiment
-    const analysis = await state.bedrockService.analyzeCall(state.conversationHistory);
+    // Run summary and analysis in parallel
+    const [summary, analysis] = await Promise.all([
+      state.bedrockService.summarizeCall(state.conversationHistory),
+      state.bedrockService.analyzeCall(state.conversationHistory),
+    ]);
+
+    // Get caller phone for contact upsert
+    const { data: callRecord } = await supabase
+      .from('calls')
+      .select('caller_phone')
+      .eq('twilio_call_sid', state.callSid)
+      .single();
 
     // Update call record
     await supabase
@@ -218,43 +363,51 @@ async function handleCallEnd(state: SessionState, request: FastifyRequest) {
       .update({
         status: 'completed',
         transcript: state.conversationHistory,
-        summary: summary,
+        summary,
         sentiment: analysis.sentiment,
         intent: analysis.intent,
         lead_score: analysis.leadScore,
+        duration_seconds: durationSeconds,
+        minutes_billed: minutesBilled,
         ended_at: new Date().toISOString(),
-        duration_seconds: Math.round(
-          (Date.now() - new Date(state.conversationHistory[0].timestamp).getTime()) / 1000
-        ),
       })
       .eq('twilio_call_sid', state.callSid);
 
-    // Update or create contact
-    const callerPhone = await getCallerPhone(state.callSid);
-    if (callerPhone) {
+    // Track minutes usage
+    await state.analyticsService.recordCallMinutes(state.orgId, durationSeconds);
+
+    // Upsert contact
+    if (callRecord?.caller_phone) {
+      const { data: existing } = await supabase
+        .from('contacts')
+        .select('total_calls')
+        .eq('org_id', state.orgId)
+        .eq('phone', callRecord.caller_phone)
+        .single();
+
       await supabase.from('contacts').upsert(
         {
           org_id: state.orgId,
-          phone: callerPhone,
-          name: analysis.callerName || null,
-          total_calls: 1,
+          phone: callRecord.caller_phone,
+          name: analysis.callerName || undefined,
+          total_calls: (existing?.total_calls || 0) + 1,
           last_call_at: new Date().toISOString(),
         },
         { onConflict: 'org_id,phone' }
       );
     }
 
-    request.log.info({ callSid: state.callSid }, 'Call ended and summarized');
+    request.log.info(
+      { callSid: state.callSid, duration: durationSeconds, sentiment: analysis.sentiment },
+      'Call completed and summarized'
+    );
   } catch (error) {
-    request.log.error({ error, callSid: state.callSid }, 'Error ending call');
-  }
-}
+    request.log.error({ error, callSid: state.callSid }, 'Error during call end processing');
 
-async function getCallerPhone(callSid: string): Promise<string | null> {
-  const { data } = await supabase
-    .from('calls')
-    .select('caller_phone')
-    .eq('twilio_call_sid', callSid)
-    .single();
-  return data?.caller_phone || null;
+    // Still try to mark the call as completed
+    await supabase
+      .from('calls')
+      .update({ status: 'completed', ended_at: new Date().toISOString() })
+      .eq('twilio_call_sid', state.callSid);
+  }
 }

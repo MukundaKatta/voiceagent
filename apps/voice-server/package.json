@@ -13,12 +13,14 @@
     "fastify": "^5.2.0",
     "@fastify/websocket": "^11.0.0",
     "@fastify/cors": "^10.0.0",
+    "@fastify/formbody": "^8.0.0",
     "@aws-sdk/client-bedrock-runtime": "^3.750.0",
     "@supabase/supabase-js": "^2.49.0",
     "twilio": "^5.4.0",
     "googleapis": "^144.0.0",
     "zod": "^3.24.0",
     "pino": "^9.6.0",
+    "stripe": "^17.0.0",
     "@voiceagent/shared": "workspace:*"
   },
   "devDependencies": {

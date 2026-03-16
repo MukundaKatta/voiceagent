@@ -1,5 +1,6 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { supabase } from '../services/supabase.service.js';
+import { isWithinBusinessHours } from '@voiceagent/shared';
 
 export async function callHandler(request: FastifyRequest, reply: FastifyReply) {
   const body = request.body as Record<string, string>;
@@ -18,44 +19,117 @@ export async function callHandler(request: FastifyRequest, reply: FastifyReply) 
 
   if (!org) {
     request.log.warn({ calledNumber }, 'No organization found for number');
-    reply.type('text/xml').send(`
-      <Response>
-        <Say>Sorry, this number is not configured. Goodbye.</Say>
-        <Hangup/>
-      </Response>
-    `);
+    reply.type('text/xml').send(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Sorry, this number is not currently in service. Goodbye.</Say>
+  <Hangup/>
+</Response>`
+    );
     return;
   }
+
+  // Look up caller in contacts
+  const { data: contact } = await supabase
+    .from('contacts')
+    .select('name')
+    .eq('org_id', org.id)
+    .eq('phone', callerNumber)
+    .single();
 
   // Create call record
   await supabase.from('calls').insert({
     org_id: org.id,
     twilio_call_sid: callSid,
     caller_phone: callerNumber,
+    caller_name: contact?.name || null,
     direction: 'inbound',
     status: 'ringing',
   });
 
-  const wsUrl = process.env.VOICE_SERVER_WS_URL || 'wss://voice.yourdomain.com/ws';
+  // Check business hours
+  const isOpen = isWithinBusinessHours(org.business_hours, org.timezone);
 
-  // Return TwiML with ConversationRelay
+  // Build welcome greeting
+  let greeting: string;
+  if (!isOpen) {
+    greeting = `Thank you for calling ${org.name}. We are currently closed. Our AI assistant can still help you with general questions or you can leave a message.`;
+  } else if (contact?.name) {
+    greeting = `Welcome back ${contact.name}! Thank you for calling ${org.name}. How can I help you today?`;
+  } else {
+    greeting = `Hello, thank you for calling ${org.name}. How can I help you today?`;
+  }
+
+  const wsUrl = process.env.VOICE_SERVER_WS_URL || 'wss://voice.yourdomain.com/ws';
+  const statusCallbackUrl = process.env.VOICE_SERVER_URL
+    ? `${process.env.VOICE_SERVER_URL}/voice/status`
+    : '';
+
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <ConversationRelay
-      url="${wsUrl}?orgId=${org.id}&amp;callSid=${callSid}"
-      voice="${org.voice_id || 'en-US-Neural2-F'}"
-      language="${org.language || 'en-US'}"
+      url="${wsUrl}?orgId=${escapeXml(org.id)}&amp;callSid=${escapeXml(callSid)}&amp;isOpen=${isOpen}"
+      voice="${escapeXml(org.voice_id || 'en-US-Neural2-F')}"
+      language="${escapeXml(org.language || 'en-US')}"
       dtmfDetection="true"
       interruptible="true"
       ttsProvider="google"
       speechModel="telephony"
-      welcomeGreeting="${escapeXml(org.greeting_prompt ? 'Hello! ' : 'Hello, thank you for calling ' + org.name + '. How can I help you today?')}"
+      welcomeGreeting="${escapeXml(greeting)}"
+      transcriptionProvider="deepgram"
+      profanityFilter="true"
     />
   </Connect>
 </Response>`;
 
   reply.type('text/xml').send(twiml);
+}
+
+/**
+ * Twilio call status callback handler.
+ * Receives updates when call status changes (ringing, in-progress, completed, etc.)
+ */
+export async function callStatusHandler(request: FastifyRequest, reply: FastifyReply) {
+  const body = request.body as Record<string, string>;
+  const callSid = body.CallSid;
+  const callStatus = body.CallStatus;
+  const duration = body.CallDuration;
+  const recordingUrl = body.RecordingUrl;
+
+  request.log.info({ callSid, callStatus, duration }, 'Call status update');
+
+  const updates: Record<string, unknown> = {};
+
+  switch (callStatus) {
+    case 'completed':
+      updates.status = 'completed';
+      updates.ended_at = new Date().toISOString();
+      if (duration) updates.duration_seconds = parseInt(duration, 10);
+      break;
+    case 'busy':
+    case 'no-answer':
+      updates.status = 'missed';
+      updates.ended_at = new Date().toISOString();
+      break;
+    case 'failed':
+      updates.status = 'failed';
+      updates.ended_at = new Date().toISOString();
+      break;
+  }
+
+  if (recordingUrl) {
+    updates.recording_url = recordingUrl;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await supabase
+      .from('calls')
+      .update(updates)
+      .eq('twilio_call_sid', callSid);
+  }
+
+  reply.status(200).send({ received: true });
 }
 
 function escapeXml(str: string): string {
