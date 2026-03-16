@@ -1,0 +1,12 @@
+{
+  "name": "@voiceagent/supabase",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "migrate": "supabase db push",
+    "seed": "supabase db reset --db-url $DATABASE_URL",
+    "start": "supabase start",
+    "stop": "supabase stop",
+    "status": "supabase status"
+  }
+}

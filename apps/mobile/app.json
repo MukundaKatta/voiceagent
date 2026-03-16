@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "VoiceAgent",
+    "slug": "voiceagent",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "voiceagent",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "com.officethree.voiceagent",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.officethree.voiceagent",
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      }
+    },
+    "plugins": ["expo-router"]
+  }
+}

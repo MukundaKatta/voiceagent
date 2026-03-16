@@ -1,0 +1,21 @@
+{
+  "name": "voiceagent",
+  "private": true,
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "type-check": "turbo type-check",
+    "db:migrate": "pnpm --filter @voiceagent/supabase migrate",
+    "db:seed": "pnpm --filter @voiceagent/supabase seed",
+    "db:reset": "pnpm --filter @voiceagent/supabase reset"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  }
+}
