@@ -4,12 +4,13 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import {
-  Phone, BarChart3, BookOpen, Calendar, Users,
+  LayoutDashboard, Phone, BarChart3, BookOpen, Calendar, Users,
   Settings, CreditCard, LogOut,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navItems = [
+  { href: '/overview', label: 'Overview', icon: LayoutDashboard },
   { href: '/calls', label: 'Calls', icon: Phone },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/knowledge', label: 'Knowledge Base', icon: BookOpen },
