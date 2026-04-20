@@ -1,6 +1,7 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { supabase } from '../services/supabase.service.js';
 import { isWithinBusinessHours } from '@voiceagent/shared';
+import { createEscalationPlan } from '../types/index.js';
 
 export async function callHandler(request: FastifyRequest, reply: FastifyReply) {
   const body = request.body as Record<string, string>;
@@ -49,6 +50,11 @@ export async function callHandler(request: FastifyRequest, reply: FastifyReply) 
 
   // Check business hours
   const isOpen = isWithinBusinessHours(org.business_hours, org.timezone);
+  const escalation = createEscalationPlan({
+    callSid,
+    isOpen,
+    confidence: isOpen ? 0.85 : 0.2,
+  });
 
   // Build welcome greeting
   let greeting: string;
@@ -77,6 +83,11 @@ export async function callHandler(request: FastifyRequest, reply: FastifyReply) 
       ttsProvider="google"
       speechModel="telephony"
       welcomeGreeting="${escapeXml(greeting)}"
+      debug="${escapeXml(JSON.stringify({
+        escalationRoute: escalation.route,
+        escalationOutcome: escalation.outcome,
+        requiresCallback: escalation.metadata.requiresCallback,
+      }))}"
       transcriptionProvider="deepgram"
       profanityFilter="true"
     />

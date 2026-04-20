@@ -11,6 +11,7 @@ import { KnowledgeService } from '../services/knowledge.service.js';
 import { AnalyticsService } from '../services/analytics.service.js';
 import { executeToolCall } from './tools.handler.js';
 import { buildSystemPrompt } from '../prompts/system.prompt.js';
+import { createEscalationPlan } from '../types/index.js';
 
 const SENTENCE_DELIMITERS = /[.!?;]\s/;
 
@@ -26,6 +27,7 @@ interface SessionState {
   activeAbortController: AbortController | null;
   callEnded: boolean;
   startedAt: number;
+  repeatAttempts: number;
 }
 
 export async function conversationHandler(socket: WebSocket, request: FastifyRequest) {
@@ -45,6 +47,7 @@ export async function conversationHandler(socket: WebSocket, request: FastifyReq
     activeAbortController: null,
     callEnded: false,
     startedAt: Date.now(),
+    repeatAttempts: 0,
   };
 
   request.log.info({ orgId, callSid }, 'WebSocket connected');
@@ -295,6 +298,7 @@ async function handlePrompt(
 
         onError(error: Error) {
           request.log.error({ error }, 'Bedrock stream error');
+          state.repeatAttempts += 1;
           if (state.isProcessing) {
             socket.send(JSON.stringify({
               type: 'text',
@@ -343,6 +347,12 @@ async function handleCallEnd(socket: WebSocket, state: SessionState, request: Fa
   try {
     const durationSeconds = Math.round((Date.now() - state.startedAt) / 1000);
     const minutesBilled = Math.ceil(durationSeconds / 60);
+    const escalation = createEscalationPlan({
+      callSid: state.callSid,
+      isOpen: true,
+      confidence: state.repeatAttempts > 1 ? 0.4 : 0.8,
+      repeatAttempts: state.repeatAttempts,
+    });
 
     // Run summary and analysis in parallel
     const [summary, analysis] = await Promise.all([
@@ -398,7 +408,13 @@ async function handleCallEnd(socket: WebSocket, state: SessionState, request: Fa
     }
 
     request.log.info(
-      { callSid: state.callSid, duration: durationSeconds, sentiment: analysis.sentiment },
+      {
+        callSid: state.callSid,
+        duration: durationSeconds,
+        sentiment: analysis.sentiment,
+        outcome: escalation.outcome,
+        fallback: escalation.route,
+      },
       'Call completed and summarized'
     );
   } catch (error) {
