@@ -10,7 +10,7 @@
 
 export type DayOfWeek = 0 | 1 | 2 | 3 | 4 | 5 | 6; // Sun..Sat
 
-export type BusinessHours = {
+export type SlotHours = {
   dayOfWeek: DayOfWeek;
   openMin: number;           // minutes from local midnight
   closeMin: number;
@@ -76,7 +76,7 @@ function localDayOfWeek(ms: number, tzOffsetMin: number): DayOfWeek {
 
 /** Rank and return the top N offerable slots. */
 export function recommendSlots(
-  hours: BusinessHours[],
+  hours: SlotHours[],
   bookings: Booking[],
   prefs: CallerPrefs,
   cfg: RecommendConfig = DEFAULT_RECOMMEND_CONFIG,
@@ -88,7 +88,7 @@ export function recommendSlots(
   const start = Math.max(cfg.nowMs, prefs.earliestMs ?? cfg.nowMs);
   const end = Math.min(cfg.nowMs + horizonMs, prefs.latestMs ?? cfg.nowMs + horizonMs);
 
-  const hoursByDow = new Map<DayOfWeek, BusinessHours>();
+  const hoursByDow = new Map<DayOfWeek, SlotHours>();
   for (const h of hours) hoursByDow.set(h.dayOfWeek, h);
 
   const offers: SlotOffer[] = [];
