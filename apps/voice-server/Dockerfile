@@ -6,7 +6,10 @@ WORKDIR /app
 # Copy workspace config
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json ./
 COPY apps/voice-server/package.json apps/voice-server/
+COPY apps/web/package.json apps/web/
+COPY apps/mobile/package.json apps/mobile/
 COPY packages/shared/package.json packages/shared/
+COPY packages/supabase/package.json packages/supabase/
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile
