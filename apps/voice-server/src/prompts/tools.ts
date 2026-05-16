@@ -71,6 +71,21 @@ export function getToolDefinitions(org: Organization) {
         },
       },
     },
+    {
+      toolSpec: {
+        name: 'lookup_info',
+        description: 'Search the knowledge base for specific information the caller is asking about (e.g. menu items, services, pricing, hours).',
+        inputSchema: {
+          json: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'The question or topic to look up' },
+            },
+            required: ['query'],
+          },
+        },
+      },
+    },
   ];
 
   return tools;
