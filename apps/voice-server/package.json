@@ -17,7 +17,7 @@
     "@aws-sdk/client-bedrock-runtime": "^3.750.0",
     "@supabase/supabase-js": "^2.49.0",
     "twilio": "^5.4.0",
-    "googleapis": "^144.0.0",
+    "googleapis": "^173.0.0",
     "zod": "^3.24.0",
     "pino": "^9.6.0",
     "stripe": "^17.0.0",
