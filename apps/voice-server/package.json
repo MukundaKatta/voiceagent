@@ -19,7 +19,7 @@
     "twilio": "^5.4.0",
     "googleapis": "^144.0.0",
     "zod": "^3.24.0",
-    "pino": "^9.6.0",
+    "pino": "^10.3.1",
     "stripe": "^17.0.0",
     "@voiceagent/shared": "workspace:*"
   },
