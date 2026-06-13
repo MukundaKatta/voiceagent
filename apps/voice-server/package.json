@@ -20,7 +20,7 @@
     "googleapis": "^144.0.0",
     "zod": "^3.24.0",
     "pino": "^9.6.0",
-    "stripe": "^17.0.0",
+    "stripe": "^22.2.1",
     "@voiceagent/shared": "workspace:*"
   },
   "devDependencies": {
